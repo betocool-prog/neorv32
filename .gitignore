@@ -33,3 +33,6 @@ sw/image_gen/image_gen.exe
 # compiled ghdl stuff
 *.cf
 *.o
+
+# VS Code config
+/.vscode/

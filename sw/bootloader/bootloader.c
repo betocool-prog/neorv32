@@ -125,7 +125,7 @@
 
 /** SPI flash boot base address */
 #ifndef SPI_BOOT_BASE_ADDR
-  #define SPI_BOOT_BASE_ADDR 0x08000000
+  #define SPI_BOOT_BASE_ADDR 0x00400000
 #endif
 /**@}*/
 
@@ -620,7 +620,6 @@ void get_exe(int src) {
 
   getting_exe = 0; // to inform trap handler we are done getting an executable
 }
-
 
 /**********************************************************************//**
  * Store content of instruction memory to SPI flash.
