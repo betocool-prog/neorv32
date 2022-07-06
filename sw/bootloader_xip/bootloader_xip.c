@@ -256,6 +256,7 @@ int main(void)
   char xip_status = 0;
   uint32_t aux = 0;
   char* aux_ptr = 0;
+  uint32_t retval = 0;
 
   // configure trap handler (bare-metal, no neorv32 rte available)
   neorv32_cpu_csr_write(CSR_MTVEC, (uint32_t)(&bootloader_trap_handler));
@@ -294,26 +295,43 @@ int main(void)
   // ------------------------------------------------
 #if (XIP_EN != 0)
 #if (AUTO_BOOT_TIMEOUT != 0)
-  if (neorv32_mtime_available()) {
-
+  if (neorv32_mtime_available())
+  {
     uint64_t timeout_time = neorv32_mtime_get_time() + (uint64_t)(AUTO_BOOT_TIMEOUT * NEORV32_SYSINFO.CLK);
 
-    while(1){
-
+    while(retval == 0)
+    {
       if (neorv32_uart0_available())
       { 
         // wait for a poke...
         if (neorv32_uart0_char_received())
         {
           neorv32_uart0_putc(0x00);
-          break;
+          retval = 1;
         }
       }
 
-      // if (neorv32_mtime_get_time() >= timeout_time) { // timeout? start auto boot sequence
-      //   // Load from XIP
-      //   // while(1);
-      // }
+      if(retval == 0)
+      {
+        if (neorv32_mtime_get_time() >= timeout_time) 
+        { // timeout? start auto boot sequence
+          // configure and enable the actual XIP mode
+          // * configure 3 address bytes send to the SPI flash for addressing
+          // * map the XIP flash to the address space starting at 0x20000000
+          if (neorv32_xip_start(3, 0x20000000))
+          {
+            status_msg.err_code = ERROR_XIP_SETUP;
+            retval = 1;
+          }
+
+          if(retval == 0)
+          {
+            // finally, jump to the XIP flash's base address we have configured to start execution **from there**
+            asm volatile ("call %[dest]" : : [dest] "i" (0x20040000));
+            while(1);
+          }
+        }
+      }
     }
   }
 #else
@@ -342,6 +360,22 @@ int main(void)
     else if (console_cmd == EXECUTE)
     {
       neorv32_uart0_putc(console_cmd);
+      // configure and enable the actual XIP mode
+      // * configure 3 address bytes send to the SPI flash for addressing
+      // * map the XIP flash to the address space starting at 0x20000000
+      retval = 0;
+      if (neorv32_xip_start(3, 0x20000000))
+      {
+        status_msg.err_code = ERROR_XIP_SETUP;
+        retval = 1;
+      }
+
+      if(retval == 0)
+      {
+        // finally, jump to the XIP flash's base address we have configured to start execution **from there**
+        asm volatile ("call %[dest]" : : [dest] "i" (0x20040000));
+        while(1);
+      }
     }
     else if (console_cmd == FLASH_WRITE)
     {
@@ -487,12 +521,13 @@ void flash_read(uint32_t addr, uint32_t len)
  **************************************************************************/
 void flash_write(uint32_t addr, uint32_t len)
 {
-  uint32_t tmp_addr;
-  uint32_t idx = 0;
+  uint32_t idx;
+  uint32_t data_idx = 0;
   uint32_t tmp = 0;
   uint32_t ret_val = 0;
+  char* tmp_ptr = 0;
 
-  tmp_addr = addr;
+  tmp_ptr = (char *)&data.uint32[0];
 
   // We only allow writing 256 bytes at a time
 
@@ -504,13 +539,14 @@ void flash_write(uint32_t addr, uint32_t len)
 
   if(ret_val == 0)
   {
-    for(idx = 0; idx < len; idx++)
+    for(data_idx = 0; data_idx < len; data_idx++)
     {
-      data_page[idx] = neorv32_uart0_getc();
-      neorv32_gpio_port_set(data_page[idx] << 1); // Visual aid. Completely optional
+      data_page[data_idx] = neorv32_uart0_getc();
+      neorv32_gpio_port_set(data_page[data_idx] << 1); // Visual aid. Completely optional
     }
 
-    for(idx = 0; idx < len; idx++)
+    data_idx = 0;
+    while(data_idx < len)
     {
       // Set Enable Write 
       data.uint32[1] = (SPI_FLASH_CMD_WRITE_ENABLE << 24) & 0xFF000000;
@@ -521,23 +557,34 @@ void flash_write(uint32_t addr, uint32_t len)
       // write word
       // 1 byte command, 3 bytes address, 1 byte data
       tmp = SPI_FLASH_CMD_WRITE_BYTES << 24; // command: byte read
-      tmp |= ((tmp_addr + idx) & 0x00FFFFFF); // address
-      data.uint32[0] = data_page[idx] << 24;
+      tmp |= ((addr + data_idx) & 0x00FFFFFF); // address
+
+      for(idx = 0; idx < 4; idx++)
+      {
+        if(data_idx < len)
+        {
+          tmp_ptr[3 - idx] = data_page[data_idx];
+          data_idx++;
+        }
+      }
+      // data.uint32[0] = data_page[data_idx] << 24;
       data.uint32[1] = tmp;
-      if(0 != neorv32_xip_spi_trans(5, &data.uint64))
+      if(0 != neorv32_xip_spi_trans(8, &data.uint64))
       {
         status_msg.err_code|= ERROR_XIP_XFER;
       };
 
       // check status register: WIP bit has to clear
-      while(1) {
+      while(1)
+      {
         // data.uint32[0] = 0; // irrelevant, TX packet is MSB-aligned
         data.uint32[1] = (SPI_FLASH_CMD_READ_STATUS << 24) & 0xFF000000;
         if(0 != neorv32_xip_spi_trans(2, &data.uint64))
         {
           status_msg.err_code|= ERROR_XIP_XFER;
         };
-        if ((data.uint32[0] & 0x01) == 0) { // WIP bit cleared?
+        if ((data.uint32[0] & 0x01) == 0)
+        { // WIP bit cleared?
           break;
         }
       }

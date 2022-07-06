@@ -186,7 +186,7 @@ class Client:
         args = arg.split(' ')
         
         if len(args) != 2:
-            print("Need to provide address and lenght!")
+            print("Need to provide address and length!")
             return
         
         addr = self.to_int(args[0])
