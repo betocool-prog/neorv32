@@ -71,7 +71,7 @@
 
 /** GPIO output pin for high-active bootloader status LED (heart beat) */
 #ifndef STATUS_LED_PIN
-  #define STATUS_LED_PIN 0
+  #define STATUS_LED_PIN 7
 #endif
 
 /* ---- Boot configuration ---- */
@@ -180,6 +180,7 @@ enum CONSOLE_CMDS {
     STATUS          = 0x05, /** Sends bootloader status information **/
     ERASE_SECTOR    = 0x06, /** Flash Erase Sector Command **/
     STATUS_BYTE     = 0x07, /** Read Status Byte Command **/
+    DEMO            = 0x08, /** Flash the demo program at 0x400000 **/
 };
 
 
@@ -223,6 +224,29 @@ uint32_t addr = 0;
 uint32_t len = 0;
 char data_page[256] = {0};
 
+/**********************************************************************//**
+ * @name Simple program to be stored to the XIP flash.
+ * This is the "blink_led_asm" from the rv32i-version "blink_led" demo program.
+ **************************************************************************/
+const uint32_t xip_program[] = 
+{
+  0xfc800513,
+  0x00052023,
+  0x00000313,
+  0x0ff37313,
+  0x00652023,
+  0x00130313,
+  0x008000ef,
+  0xff1ff06f,
+  0x001003b7,
+  0xfff38393,
+  0x00038a63,
+  0xfff38393,
+  0x00000013,
+  0x00000013,
+  0xff1ff06f,
+  0x00008067
+};
 
 // Function prototypes
 void __attribute__((__interrupt__)) bootloader_trap_handler(void);
@@ -234,7 +258,7 @@ void system_error(uint8_t err_code);
 
 // Flash function prototypes 
 void flash_read(uint32_t addr, uint32_t len);
-void flash_write(uint32_t addr, uint32_t len);
+void flash_write(uint32_t addr, uint32_t len, char* data_ptr);
 void flash_erase_sector(uint32_t addr);
 void flash_read_status(void);
 
@@ -327,7 +351,7 @@ int main(void)
           if(retval == 0)
           {
             // finally, jump to the XIP flash's base address we have configured to start execution **from there**
-            asm volatile ("call %[dest]" : : [dest] "i" (0x20040000));
+            asm volatile ("call %[dest]" : : [dest] "i" (0x20400000));
             while(1);
           }
         }
@@ -372,14 +396,15 @@ int main(void)
 
       if(retval == 0)
       {
+        neorv32_gpio_port_set(0xAA);
         // finally, jump to the XIP flash's base address we have configured to start execution **from there**
-        asm volatile ("call %[dest]" : : [dest] "i" (0x20040000));
+        asm volatile ("call %[dest]" : : [dest] "i" (0x20400000));
         while(1);
       }
     }
     else if (console_cmd == FLASH_WRITE)
     {
-      
+      /* This only writes max. 256 bytes at a time! */
       for(aux = 0; aux < 4; aux++)
       {
         ((char *)&addr)[aux] = neorv32_uart0_getc();
@@ -389,7 +414,16 @@ int main(void)
       {
         ((char *)&len)[aux] = neorv32_uart0_getc();
       }
-      flash_write(addr, len);
+      
+      for(aux = 0; aux < len; aux++)
+      {
+        data_page[aux] = neorv32_uart0_getc();
+        neorv32_gpio_port_set(data_page[aux] & 0x7F); // Visual aid. Completely optional
+      }
+
+      flash_write(addr, aux, data_page);
+      neorv32_uart0_putc(0x00);
+
     }
     else if (console_cmd == FLASH_READ)
     {
@@ -420,6 +454,12 @@ int main(void)
       }
       flash_erase_sector(addr);
       neorv32_uart0_putc(console_cmd);
+    }
+    else if (console_cmd == DEMO)
+    {
+      flash_erase_sector(0x400000);
+      flash_write(0x400000, 64, (char*)xip_program);
+      neorv32_uart0_putc(DEMO);
     }
     else if (console_cmd == STATUS_BYTE)
     {
@@ -519,79 +559,59 @@ void flash_read(uint32_t addr, uint32_t len)
 /**********************************************************************//**
  * Write data to flash
  **************************************************************************/
-void flash_write(uint32_t addr, uint32_t len)
+void flash_write(uint32_t addr, uint32_t len, char* data_ptr)
 {
   uint32_t idx;
   uint32_t data_idx = 0;
   uint32_t tmp = 0;
-  uint32_t ret_val = 0;
   char* tmp_ptr = 0;
 
   tmp_ptr = (char *)&data.uint32[0];
 
-  // We only allow writing 256 bytes at a time
-
-  if(len > 256)
+  data_idx = 0;
+  while(data_idx < len)
   {
-    status_msg.err_code |= ERROR_FLASH_WR;
-    ret_val = 1;
-  }
-
-  if(ret_val == 0)
-  {
-    for(data_idx = 0; data_idx < len; data_idx++)
+    // Set Enable Write 
+    data.uint32[1] = (SPI_FLASH_CMD_WRITE_ENABLE << 24) & 0xFF000000;
+    if(0 != neorv32_xip_spi_trans(1, &data.uint64))
     {
-      data_page[data_idx] = neorv32_uart0_getc();
-      neorv32_gpio_port_set(data_page[data_idx] << 1); // Visual aid. Completely optional
+      status_msg.err_code|= ERROR_XIP_XFER;
+    };
+    // write word
+    // 1 byte command, 3 bytes address, 1 byte data
+    tmp = SPI_FLASH_CMD_WRITE_BYTES << 24; // command: byte read
+    tmp |= ((addr + data_idx) & 0x00FFFFFF); // address
+
+    for(idx = 0; idx < 4; idx++)
+    {
+      if(data_idx < len)
+      {
+        tmp_ptr[idx] = data_ptr[data_idx];
+        data_idx++;
+      }
     }
-
-    data_idx = 0;
-    while(data_idx < len)
+    // data.uint32[0] = data_page[data_idx] << 24;
+    data.uint32[1] = tmp;
+    if(0 != neorv32_xip_spi_trans(8, &data.uint64))
     {
-      // Set Enable Write 
-      data.uint32[1] = (SPI_FLASH_CMD_WRITE_ENABLE << 24) & 0xFF000000;
-      if(0 != neorv32_xip_spi_trans(1, &data.uint64))
+      status_msg.err_code|= ERROR_XIP_XFER;
+    };
+
+    // check status register: WIP bit has to clear
+    while(1)
+    {
+      // data.uint32[0] = 0; // irrelevant, TX packet is MSB-aligned
+      data.uint32[1] = (SPI_FLASH_CMD_READ_STATUS << 24) & 0xFF000000;
+      if(0 != neorv32_xip_spi_trans(2, &data.uint64))
       {
         status_msg.err_code|= ERROR_XIP_XFER;
       };
-      // write word
-      // 1 byte command, 3 bytes address, 1 byte data
-      tmp = SPI_FLASH_CMD_WRITE_BYTES << 24; // command: byte read
-      tmp |= ((addr + data_idx) & 0x00FFFFFF); // address
-
-      for(idx = 0; idx < 4; idx++)
-      {
-        if(data_idx < len)
-        {
-          tmp_ptr[3 - idx] = data_page[data_idx];
-          data_idx++;
-        }
-      }
-      // data.uint32[0] = data_page[data_idx] << 24;
-      data.uint32[1] = tmp;
-      if(0 != neorv32_xip_spi_trans(8, &data.uint64))
-      {
-        status_msg.err_code|= ERROR_XIP_XFER;
-      };
-
-      // check status register: WIP bit has to clear
-      while(1)
-      {
-        // data.uint32[0] = 0; // irrelevant, TX packet is MSB-aligned
-        data.uint32[1] = (SPI_FLASH_CMD_READ_STATUS << 24) & 0xFF000000;
-        if(0 != neorv32_xip_spi_trans(2, &data.uint64))
-        {
-          status_msg.err_code|= ERROR_XIP_XFER;
-        };
-        if ((data.uint32[0] & 0x01) == 0)
-        { // WIP bit cleared?
-          break;
-        }
+      if ((data.uint32[0] & 0x01) == 0)
+      { // WIP bit cleared?
+        break;
       }
     }
   }
-
-  neorv32_uart0_putc(0x00);
 }
 
 

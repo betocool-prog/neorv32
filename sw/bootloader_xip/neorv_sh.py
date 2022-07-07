@@ -62,6 +62,12 @@ class CLI(cmd.Cmd):
         - erase_sector 1024'''
         self.client.erase_sector(arg)
 
+    def do_demo(self, arg):
+        '''Copy the memory blinky to address 0x400000
+        Example:
+        - demo'''
+        self.client.demo()
+
     def do_exit(self, arg):
         '''exit
         Exits the application'''
@@ -79,6 +85,7 @@ class Client:
     STATUS = b'\x05'
     ERASE_SECTOR = b'\x06'
     STATUS_BYTE = b'\x07'
+    DEMO = b'\x08'
 
     SECTORS = 128
     SECTOR_SIZE = 0x10000
@@ -125,7 +132,6 @@ class Client:
         self.ser.write(struct.pack("<I", addr))
         self.ser.write(struct.pack("<I", len(data)))
         self.ser.write(data)
-        self.ser.read(1)
         
     def flash_write(self, arg):
 
@@ -170,12 +176,14 @@ class Client:
         stop = step
         while stop <= data_len:
             self.flash_write_page(addr, data[start:stop])
+            self.ser.read(1)
             print("{:.1f}%\r".format(stop * 100 / data_len), end='')
             start = stop
             stop += step
             addr += step
 
         self.flash_write_page(addr, data[start:])
+        self.ser.read(1)
         
         print("100.0%")            
         print("Finished writing {} bytes...".format(data_len))
@@ -234,6 +242,12 @@ class Client:
         self.ser.write(struct.pack('<I', addr))
         reply = self.ser.read(1)
         print("Reply: {}".format(reply))
+
+    def demo(self):
+        self.ser.write(self.DEMO)
+        reply = self.ser.read(1)
+        print("Reply: {}".format(reply))
+
 
     def status(self):
         self.ser.write(self.STATUS)
