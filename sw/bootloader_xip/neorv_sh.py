@@ -4,6 +4,7 @@ import serial
 import cmd
 import struct
 import time
+import numpy as np
 
 class CLI(cmd.Cmd):
 
@@ -18,59 +19,52 @@ class CLI(cmd.Cmd):
 
     def do_execute(self, arg):
         '''execute
-        Start application execution using XIP'''
+Start application execution using XIP'''
         self.client.execute()
 
     def do_flash_write(self, arg):
         '''flash_write addr(hex or int) filename
-        Examples:
-        - flash_write 0x0 ./main.bin
-        - flash_write 0x2000 ../folder_to/main.bin'''
+Examples:
+- flash_write 0x0 ./main.bin
+- flash_write 0x2000 ../folder_to/main.bin'''
         self.client.flash_write(arg)
 
     def do_status_byte(self, arg):
         '''status_byte
-        Reads flash status byte'''
+Reads flash status byte'''
         self.client.status_byte()
 
     def do_flash_read(self, arg):
         '''flash_read addr(hex or int) length_in_bytes(hex or int)
-        Examples:
-        - flash_read 0x2000 128
-        - flash_read 1024 0x100'''
+Examples:
+- flash_read 0x2000 128
+- flash_read 1024 0x100'''
         self.client.flash_read(arg)
-
-    def do_status(self, arg):
-        '''status
-        Returns bootloader status information'''
-        self.client.status()
 
     def do_reset(self, arg):
         '''reset
-        Reset bootloader'''
+Resets the bootloader'''
         self.client.reset()
 
     def do_poke(self, arg):
         '''poke
-        Sends a 0x00 character to the serial port'''
+Sends a 0x00 character to the serial port, expecting the same answer back'''
         self.client.poke_bl()
 
     def do_erase_sector(self, arg):
         '''erase_sector addr(hex or int)
-        Examples:
-        - erase_sector 0x10000
-        - erase_sector 1024'''
+Examples:
+- erase_sector 0x10000
+- erase_sector 1024'''
         self.client.erase_sector(arg)
 
     def do_demo(self, arg):
-        '''Copy the memory blinky to address 0x400000
-        Example:
-        - demo'''
+        '''Copy the memory blinky to address 0x400000'''
         self.client.demo()
 
     def do_exit(self, arg):
         '''exit
-        Exits the application'''
+Exits the application'''
         print("")
         return True
 
@@ -82,7 +76,6 @@ class Client:
     FLASH_WRITE = b'\x02'
     FLASH_READ = b'\x03'
     RESET = b'\x04'
-    STATUS = b'\x05'
     ERASE_SECTOR = b'\x06'
     STATUS_BYTE = b'\x07'
     DEMO = b'\x08'
@@ -119,12 +112,13 @@ class Client:
     def execute(self):
         self.ser.write(self.EXECUTE)
         reply = self.ser.read()
-        print("Reply: {}".format(reply))
+        if reply == self.EXECUTE:
+            print("Jumping to application...")
 
     def status_byte(self):
         self.ser.write(self.STATUS_BYTE)
         reply = self.ser.read(1)
-        print("Reply: {}".format(reply))
+        print("Status byte: 0x{:02X}".format(ord(reply)))
 
     def flash_write_page(self, addr, data):
         # This function writes 256 bytes or less only!
@@ -147,13 +141,10 @@ class Client:
         
         # Open file to write
         try:
-            fd = open(arg[1], 'rb')
+            data = np.fromfile(file=arg[1], dtype='I').tobytes()
         except Exception as e:
             print("Could not open file: {}".format(repr(e)))
             return
-        else:
-            data = fd.read()
-            fd.close()
 
         # Confirm data fits into flash
         data_len = len(data)
@@ -241,28 +232,28 @@ class Client:
         self.ser.write(self.ERASE_SECTOR)
         self.ser.write(struct.pack('<I', addr))
         reply = self.ser.read(1)
-        print("Reply: {}".format(reply))
+        if reply == self.ERASE_SECTOR:
+            print("Sector erased!")
 
     def demo(self):
         self.ser.write(self.DEMO)
         reply = self.ser.read(1)
-        print("Reply: {}".format(reply))
-
-
-    def status(self):
-        self.ser.write(self.STATUS)
-        reply = self.ser.read(8)
-        print("Reply: {}".format(reply))
+        if reply == self.DEMO:
+            print("Flashed demo!")
 
     def reset(self):
         self.ser.write(self.RESET)
         reply = self.ser.read()
-        print("Reply: {}".format(reply))
+        if reply == self.RESET:
+            print("Reset!")
 
     def poke_bl(self):
         self.ser.write(self.POKE)
         reply = self.ser.read()
-        print("Reply: {}".format(reply))
+        if(reply):
+            print("Poked!")
+        else:
+            print("No reply... Not in bootloader mode")
 
 
 if __name__ == "__main__":

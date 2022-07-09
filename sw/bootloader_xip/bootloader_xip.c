@@ -71,7 +71,7 @@
 
 /** GPIO output pin for high-active bootloader status LED (heart beat) */
 #ifndef STATUS_LED_PIN
-  #define STATUS_LED_PIN 7
+  #define STATUS_LED_PIN 0
 #endif
 
 /* ---- Boot configuration ---- */
@@ -130,7 +130,8 @@ enum ERROR_CODES {
   ERROR_FLASH     = 0x08, /**< 8: SPI flash access error */
   ERROR_XIP_SETUP = 0x10, /**< 16: XIP Setup error */
   ERROR_XIP_XFER  = 0x20, /**< 32: XIP transfer error */
-  ERROR_FLASH_WR  = 0x40, /**< 32: XIP transfer error */
+  ERROR_FLASH_WR  = 0x40, /**< 64: Flash write error */
+  ERROR_TRAP      = 0x80, /**< 128: Other error */
 };
 
 
@@ -173,46 +174,15 @@ enum NEORV32_EXECUTABLE {
  * Bootloader Console commands
  **************************************************************************/
 enum CONSOLE_CMDS {
+    POKE            = 0x00, /** Just a simple poke to check if bootloader is on **/
     EXECUTE         = 0x01, /** Executes application from SPI Flash using XIP **/
     FLASH_WRITE     = 0x02, /** Loads new executable to flash **/
     FLASH_READ      = 0x03, /** Reads the executable from flash and sends it to the console **/
     RESET           = 0x04, /** Resets the bootloader **/
-    STATUS          = 0x05, /** Sends bootloader status information **/
     ERASE_SECTOR    = 0x06, /** Flash Erase Sector Command **/
     STATUS_BYTE     = 0x07, /** Read Status Byte Command **/
     DEMO            = 0x08, /** Flash the demo program at 0x400000 **/
 };
-
-
-/**********************************************************************//**
- * Valid executable identification signature
- **************************************************************************/
-#define EXE_SIGNATURE 0x4788CAFE
-
-/**********************************************************************//**
- * Helper macros
- **************************************************************************/
-/**@{*/
-/** Actual define-to-string helper */
-#define xstr(a) str(a)
-/** Internal helper macro */
-#define str(a) #a
-/**@}*/
-
-/**********************************************************************//**
- * Only set during executable fetch (required for capturing STORE BUS-TIMOUT exception).
- **************************************************************************/
-volatile uint32_t getting_exe;
-
-/**********************************************************************//**
- * Status Message
- **************************************************************************/
-typedef struct {
-  uint32_t err_code;
-  uint32_t sector_erased;
-} t_status;
-
-t_status status_msg = {0};
 
 // SPI Flash data
 union {
@@ -277,21 +247,19 @@ void flash_read_status(void);
 int main(void)
 {
   char console_cmd = 0;
-  char xip_status = 0;
   uint32_t aux = 0;
-  char* aux_ptr = 0;
   uint32_t retval = 0;
 
-  // configure trap handler (bare-metal, no neorv32 rte available)
-  neorv32_cpu_csr_write(CSR_MTVEC, (uint32_t)(&bootloader_trap_handler));
-
 #if (XIP_EN != 0)
-  xip_status = (char)(0xFF & neorv32_xip_setup(CLK_PRSC_2, 0, 0, 0x03));
-  if(xip_status != 0)
-  {
-    status_msg.err_code |= ERROR_XIP_SETUP;
-  }
+  retval = neorv32_xip_setup(CLK_PRSC_2, 0, 0, 0x03);
+#else
+  #error In order to use the XIP bootloader, the XIP module must be implemented
 #endif
+  if(retval)
+  {
+    // Wrong configuration
+    system_error(0xFF & ERROR_XIP_SETUP);
+  }
 
 #if (STATUS_LED_EN != 0)
   if (neorv32_gpio_available()) {
@@ -310,9 +278,12 @@ int main(void)
     neorv32_mtime_set_timecmp(0 + (NEORV32_SYSINFO.CLK/4));
     // active timer IRQ
     neorv32_cpu_csr_write(CSR_MIE, 1 << CSR_MIE_MTIE); // activate MTIME IRQ source only!
-    neorv32_cpu_eint(); // enable global interrupts
   }
 
+  // configure trap handler (bare-metal, no neorv32 rte available) 
+  // after all peripherals are OK!
+  neorv32_cpu_csr_write(CSR_MTVEC, (uint32_t)(&bootloader_trap_handler));
+  neorv32_cpu_eint(); // enable global interrupts
 
   // ------------------------------------------------
   // Auto boot sequence
@@ -344,14 +315,14 @@ int main(void)
           // * map the XIP flash to the address space starting at 0x20000000
           if (neorv32_xip_start(3, 0x20000000))
           {
-            status_msg.err_code = ERROR_XIP_SETUP;
             retval = 1;
+            system_error(0xFF & ERROR_XIP_SETUP);
           }
 
           if(retval == 0)
           {
             // finally, jump to the XIP flash's base address we have configured to start execution **from there**
-            asm volatile ("call %[dest]" : : [dest] "i" (0x20400000));
+            asm volatile ("call %[dest]" : : [dest] "i" (0x20000000 + SPI_FLASH_BASE_ADDR));
             while(1);
           }
         }
@@ -381,6 +352,10 @@ int main(void)
       
       asm volatile ("li t0, %[input_i]; jr t0" :  : [input_i] "i" (BOOTLOADER_BASE_ADDRESS)); // jump to beginning of boot ROM
     }
+    else if (console_cmd == POKE)
+    {
+      neorv32_uart0_putc(console_cmd);
+    }
     else if (console_cmd == EXECUTE)
     {
       neorv32_uart0_putc(console_cmd);
@@ -390,17 +365,13 @@ int main(void)
       retval = 0;
       if (neorv32_xip_start(3, 0x20000000))
       {
-        status_msg.err_code = ERROR_XIP_SETUP;
-        retval = 1;
+        system_error(0xFF & ERROR_XIP_SETUP);
       }
 
-      if(retval == 0)
-      {
-        neorv32_gpio_port_set(0xAA);
-        // finally, jump to the XIP flash's base address we have configured to start execution **from there**
-        asm volatile ("call %[dest]" : : [dest] "i" (0x20400000));
-        while(1);
-      }
+      neorv32_gpio_port_set(0x0);
+      // finally, jump to the XIP flash's base address we have configured to start execution **from there**
+      asm volatile ("call %[dest]" : : [dest] "i" (0x20000000 + SPI_FLASH_BASE_ADDR));
+      while(1);
     }
     else if (console_cmd == FLASH_WRITE)
     {
@@ -438,14 +409,6 @@ int main(void)
       }
       flash_read(addr, len);
     }
-    else if (console_cmd == STATUS)
-    {
-      aux_ptr = (char*)&(status_msg);
-      for(aux = 0; aux < sizeof(status_msg); aux++)
-      {
-        neorv32_uart0_putc(aux_ptr[aux]);
-      }
-    }
     else if (console_cmd == ERASE_SECTOR)
     {
       for(aux = 0; aux < 4; aux++)
@@ -476,52 +439,50 @@ int main(void)
  **************************************************************************/
 void flash_erase_sector(uint32_t addr)
 {
-    data.uint64 = 0; // Init to zero before any operation
+  data.uint64 = 0; // Init to zero before any operation
+  
+  // set status bits to 000
+  // 1 byte command
+  //data.uint32[0] = 0; // irrelevant, TX packet is MSB-aligned
+  // data.uint32[1] = 0; // command: set write-enable latch
+  if(0 != neorv32_xip_spi_trans(1, &data.uint64))
+  {
+    system_error(0xFF & ERROR_FLASH);
+  };
     
-    // set status bits to 000
-    // 1 byte command
-    //data.uint32[0] = 0; // irrelevant, TX packet is MSB-aligned
-    // data.uint32[1] = 0; // command: set write-enable latch
-    if(0 != neorv32_xip_spi_trans(1, &data.uint64))
-    {
-      status_msg.err_code|= ERROR_XIP_XFER;
-    };
-    
-    // set write-enable latch
-    // 1 byte command
-    //data.uint32[0] = 0; // irrelevant, TX packet is MSB-aligned
-    data.uint32[1] = (SPI_FLASH_CMD_WRITE_ENABLE << 24) & 0xFF000000; // command: set write-enable latch
-    if(0 != neorv32_xip_spi_trans(1, &data.uint64))
-    {
-      status_msg.err_code|= ERROR_XIP_XFER;
-    };
+  // set write-enable latch
+  // 1 byte command
+  //data.uint32[0] = 0; // irrelevant, TX packet is MSB-aligned
+  data.uint32[1] = (SPI_FLASH_CMD_WRITE_ENABLE << 24) & 0xFF000000; // command: set write-enable latch
+  if(0 != neorv32_xip_spi_trans(1, &data.uint64))
+  {
+    system_error(0xFF & ERROR_FLASH_WR);
+  };
 
-    data.uint64 = 0; 
-    // erase sector
-    // 1 byte command + 3 byte address
-    //data.uint32[0] = 0; // irrelevant, TX packet is MSB-aligned
-    data.uint32[1] = (SPI_FLASH_CMD_SECTOR_ERASE << 24) & 0xFF000000; // command: erase sector
-    data.uint32[1] |= addr & 0x00FFFFFF; // address data
-    if(0 != neorv32_xip_spi_trans(4, &data.uint64))
-    {
-      status_msg.err_code|= ERROR_XIP_XFER;
-    };
+  data.uint64 = 0; 
+  // erase sector
+  // 1 byte command + 3 byte address
+  //data.uint32[0] = 0; // irrelevant, TX packet is MSB-aligned
+  data.uint32[1] = (SPI_FLASH_CMD_SECTOR_ERASE << 24) & 0xFF000000; // command: erase sector
+  data.uint32[1] |= addr & 0x00FFFFFF; // address data
+  if(0 != neorv32_xip_spi_trans(4, &data.uint64))
+  {
+    system_error(0xFF & ERROR_FLASH_WR);
+  };
 
-    data.uint64 = 0; 
-    // check status register: WIP bit has to clear
-    while(1) {
-      // data.uint32[0] = 0; // irrelevant, TX packet is MSB-aligned
-      data.uint32[1] = (SPI_FLASH_CMD_READ_STATUS << 24) & 0xFF000000;
-      if(0 != neorv32_xip_spi_trans(2, &data.uint64))
-      {
-        status_msg.err_code|= ERROR_XIP_XFER;
-      };
-      if ((data.uint32[0] & 0x01) == 0) { // WIP bit cleared?
-        break;
-      }
+  data.uint64 = 0; 
+  // check status register: WIP bit has to clear
+  while(1) {
+    // data.uint32[0] = 0; // irrelevant, TX packet is MSB-aligned
+    data.uint32[1] = (SPI_FLASH_CMD_READ_STATUS << 24) & 0xFF000000;
+    if(0 != neorv32_xip_spi_trans(2, &data.uint64))
+    {
+      system_error(0xFF & ERROR_FLASH_WR);
+    };
+    if ((data.uint32[0] & 0x01) == 0) { // WIP bit cleared?
+      break;
     }
-
-    status_msg.sector_erased = addr;
+  }
 }
 
 
@@ -546,8 +507,7 @@ void flash_read(uint32_t addr, uint32_t len)
     data.uint32[1] = tmp;
     if(0 != neorv32_xip_spi_trans(5, &data.uint64))
     {
-      status_msg.err_code|= ERROR_XIP_XFER;
-      cnt = len;
+      system_error(0xFF & ERROR_FLASH);
     };
     aux++;
     cnt++;
@@ -575,7 +535,7 @@ void flash_write(uint32_t addr, uint32_t len, char* data_ptr)
     data.uint32[1] = (SPI_FLASH_CMD_WRITE_ENABLE << 24) & 0xFF000000;
     if(0 != neorv32_xip_spi_trans(1, &data.uint64))
     {
-      status_msg.err_code|= ERROR_XIP_XFER;
+      system_error(0xFF & ERROR_FLASH_WR);
     };
     // write word
     // 1 byte command, 3 bytes address, 1 byte data
@@ -590,11 +550,10 @@ void flash_write(uint32_t addr, uint32_t len, char* data_ptr)
         data_idx++;
       }
     }
-    // data.uint32[0] = data_page[data_idx] << 24;
     data.uint32[1] = tmp;
     if(0 != neorv32_xip_spi_trans(8, &data.uint64))
     {
-      status_msg.err_code|= ERROR_XIP_XFER;
+      system_error(0xFF & ERROR_FLASH_WR);
     };
 
     // check status register: WIP bit has to clear
@@ -604,7 +563,7 @@ void flash_write(uint32_t addr, uint32_t len, char* data_ptr)
       data.uint32[1] = (SPI_FLASH_CMD_READ_STATUS << 24) & 0xFF000000;
       if(0 != neorv32_xip_spi_trans(2, &data.uint64))
       {
-        status_msg.err_code|= ERROR_XIP_XFER;
+        system_error(0xFF & ERROR_FLASH);
       };
       if ((data.uint32[0] & 0x01) == 0)
       { // WIP bit cleared?
@@ -626,7 +585,7 @@ void flash_read_status(void)
   data.uint32[1] = (SPI_FLASH_CMD_READ_STATUS << 24) & 0xFF000000;
   if(0 != neorv32_xip_spi_trans(3, &data.uint64))
   {
-    status_msg.err_code|= ERROR_XIP_XFER;
+    system_error(0xFF & ERROR_FLASH);
   };
 
   neorv32_uart0_putc(data.uint32[0] & 0xFF);  
@@ -675,13 +634,14 @@ void __attribute__((__interrupt__)) bootloader_trap_handler(void) {
   }
 
   // Bus store access error during get_exe
-  else if ((cause == TRAP_CODE_S_ACCESS) && (getting_exe)) {
-    system_error(ERROR_SIZE); // -> seems like executable is too large
+  else if (cause == TRAP_CODE_S_ACCESS) {
+    system_error(ERROR_TRAP); //
   }
 
   // Anything else (that was not expected); output exception notifier and try to resume
   else {
     register uint32_t epc = neorv32_cpu_csr_read(CSR_MEPC);
     neorv32_cpu_csr_write(CSR_MEPC, epc + 4); // advance to next instruction
+    system_error(0xFF); //
   }
 }
