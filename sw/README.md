@@ -10,6 +10,12 @@ Source(s) of the default NEORV32 bootloader.
 A pre-built image is already installed into the rtl design via the `rtl/core/neorv32_bootloader_image.vhd` file.
 
 
+## [`bootloader_xip`](bootloader_xip)
+
+Source(s) of the XIP NEORV32 bootloader.
+This bootloader allows you to store a file into flash memory and execute the code from there. Detailed information about the project is found in the [bootloader_xip](bootloader_xip) folder.
+
+
 ## [`common`](common)
 
 NEORV32-specific common files for all bootloader and application programs:
