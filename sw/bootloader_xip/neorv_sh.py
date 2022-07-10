@@ -32,7 +32,12 @@
  # OF THE POSSIBILITY OF SUCH DAMAGE.                                                            # 
  # ********************************************************************************************* # 
  # The NEORV32 Processor - https://github.com/stnolting/neorv32              (c) Stephan Nolting #
- # neorv_sh.py                                                            (c) Alberto Fahrenkrog # 
+ ################################################################################################# 
+
+ ################################################################################################# 
+ # @file neorv_sh.py
+ # @author Alberto Fahrenkrog
+ # @brief XIP Bootloader Command Line interface
  ################################################################################################# 
 
 import serial
