@@ -551,7 +551,7 @@ void flash_write(uint32_t addr, uint32_t len, char* data_ptr)
     {
       if(data_idx < len)
       {
-        tmp_ptr[idx] = data_ptr[data_idx];
+        tmp_ptr[3 - idx] = data_ptr[data_idx];
         data_idx++;
       }
     }
