@@ -97,7 +97,6 @@ entity neorv32_cpu is
     rstn_i        : in  std_ulogic; -- global reset, low-active, async
     sleep_o       : out std_ulogic; -- cpu is in sleep mode when set
     debug_o       : out std_ulogic; -- cpu is in debug mode when set
-    priv_o        : out std_ulogic; -- current effective privilege level
     -- instruction bus interface --
     i_bus_addr_o  : out std_ulogic_vector(data_width_c-1 downto 0); -- bus access address
     i_bus_rdata_i : in  std_ulogic_vector(data_width_c-1 downto 0); -- bus read data
@@ -105,6 +104,7 @@ entity neorv32_cpu is
     i_bus_ack_i   : in  std_ulogic; -- bus transfer acknowledge
     i_bus_err_i   : in  std_ulogic; -- bus transfer error
     i_bus_fence_o : out std_ulogic; -- executed FENCEI operation
+    i_bus_priv_o  : out std_ulogic; -- current effective privilege level
     -- data bus interface --
     d_bus_addr_o  : out std_ulogic_vector(data_width_c-1 downto 0); -- bus access address
     d_bus_rdata_i : in  std_ulogic_vector(data_width_c-1 downto 0); -- bus read data
@@ -115,6 +115,7 @@ entity neorv32_cpu is
     d_bus_ack_i   : in  std_ulogic; -- bus transfer acknowledge
     d_bus_err_i   : in  std_ulogic; -- bus transfer error
     d_bus_fence_o : out std_ulogic; -- executed FENCE operation
+    d_bus_priv_o  : out std_ulogic; -- current effective privilege level
     -- system time input from MTIME --
     time_i        : in  std_ulogic_vector(63 downto 0); -- current system time
     -- interrupts (risc-v compliant) --
@@ -132,11 +133,11 @@ architecture neorv32_cpu_rtl of neorv32_cpu is
 
   -- local signals --
   signal ctrl        : std_ulogic_vector(ctrl_width_c-1 downto 0); -- main control bus
-  signal comparator  : std_ulogic_vector(1 downto 0); -- comparator result
   signal imm         : std_ulogic_vector(data_width_c-1 downto 0); -- immediate
   signal rs1, rs2    : std_ulogic_vector(data_width_c-1 downto 0); -- source registers
   signal alu_res     : std_ulogic_vector(data_width_c-1 downto 0); -- alu result
   signal alu_add     : std_ulogic_vector(data_width_c-1 downto 0); -- alu address result
+  signal alu_cmp     : std_ulogic_vector(1 downto 0); -- comparator result
   signal mem_rdata   : std_ulogic_vector(data_width_c-1 downto 0); -- memory read data
   signal alu_idone   : std_ulogic; -- iterative alu operation done
   signal bus_d_wait  : std_ulogic; -- wait for current bus data access
@@ -288,7 +289,7 @@ begin
     alu_idone_i   => alu_idone,     -- ALU iterative operation done
     bus_d_wait_i  => bus_d_wait,    -- wait for bus
     -- data input --
-    cmp_i         => comparator,    -- comparator status
+    cmp_i         => alu_cmp,       -- comparator status
     alu_add_i     => alu_add,       -- ALU address result
     rs1_i         => rs1,           -- rf source 1
     -- data output --
@@ -322,11 +323,11 @@ begin
   -- CPU state --
   sleep_o <= ctrl(ctrl_sleep_c); -- set when CPU is sleeping (after WFI)
   debug_o <= ctrl(ctrl_debug_running_c); -- set when CPU is in debug mode
-  priv_o  <= ctrl(ctrl_priv_mode_c); -- current effective privilege level
 
   -- instruction fetch interface --
   i_bus_addr_o  <= fetch_pc;
   i_bus_fence_o <= ctrl(ctrl_bus_fencei_c);
+  i_bus_priv_o  <= ctrl(ctrl_priv_mode_c);
 
 
   -- Register File --------------------------------------------------------------------------
@@ -366,21 +367,21 @@ begin
   )
   port map (
     -- global control --
-    clk_i       => clk_i,      -- global clock, rising edge
-    rstn_i      => rstn_i,     -- global reset, low-active, async
-    ctrl_i      => ctrl,       -- main control bus
+    clk_i       => clk_i,     -- global clock, rising edge
+    rstn_i      => rstn_i,    -- global reset, low-active, async
+    ctrl_i      => ctrl,      -- main control bus
     -- data input --
-    rs1_i       => rs1,        -- rf source 1
-    rs2_i       => rs2,        -- rf source 2
-    pc_i        => curr_pc,    -- current PC
-    imm_i       => imm,        -- immediate
+    rs1_i       => rs1,       -- rf source 1
+    rs2_i       => rs2,       -- rf source 2
+    pc_i        => curr_pc,   -- current PC
+    imm_i       => imm,       -- immediate
     -- data output --
-    cmp_o       => comparator, -- comparator status
-    res_o       => alu_res,    -- ALU result
-    add_o       => alu_add,    -- address computation result
-    fpu_flags_o => fpu_flags,  -- FPU exception flags
+    cmp_o       => alu_cmp,   -- comparator status
+    res_o       => alu_res,   -- ALU result
+    add_o       => alu_add,   -- address computation result
+    fpu_flags_o => fpu_flags, -- FPU exception flags
     -- status --
-    idone_o     => alu_idone   -- iterative processing units done?
+    idone_o     => alu_idone  -- iterative processing units done?
   );
 
 
@@ -421,7 +422,8 @@ begin
     d_bus_re_o    => d_bus_re_o,    -- read enable
     d_bus_ack_i   => d_bus_ack_i,   -- bus transfer acknowledge
     d_bus_err_i   => d_bus_err_i,   -- bus transfer error
-    d_bus_fence_o => d_bus_fence_o  -- fence operation
+    d_bus_fence_o => d_bus_fence_o, -- fence operation
+    d_bus_priv_o  => d_bus_priv_o   -- current effective privilege level
   );
 
 
