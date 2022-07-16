@@ -32,6 +32,10 @@ mimpid = 0x01040312 => 01.04.03.12 => Version 01.04.03.12 => v1.4.3.12
 
 | Date (*dd.mm.yyyy*) | Version | Comment |
 |:-------------------:|:-------:|:--------|
+| 15.07.2022 | 1.7.4.2 | :bug: fixed PMP configuration error when `PMP_NUM_REGIONS` = 0; [#368](https://github.com/stnolting/neorv32/pull/368) |
+| 15.07.2022 | 1.7.4.1 | :bug: fix permanent stall of `[m]cycle[h]` and `[m]instret[h]` counter if _HPM_NUM_CNTS_ = 0; :bug: fixed bug in Wishbone `we` signal when _ASYNC_TX_ mode enabled; hardwire `dcsr.mprven` to 1; [#367](https://github.com/stnolting/neorv32/pull/367) |
+| 14.07.2022 | [**:rocket:1.7.4**](https://github.com/stnolting/neorv32/releases/tag/v1.7.4) | **New release** |
+| 14.07.2022 | 1.7.3.11 | reset all "core" CSRs to all-zero; [#366](https://github.com/stnolting/neorv32/pull/366) |
 | 13.07.2022 | 1.7.3.10 | :bug: reworked/fixed **physical memory protection**; :sparkles: added `mstatus.MPRV` flag; [#365](https://github.com/stnolting/neorv32/pull/365) |
 | 12.07.2022 | 1.7.3.9 | clean-up and rework **bootloader**; :sparkles: add "boot via XIP" option; [#364](https://github.com/stnolting/neorv32/pull/364) |
 | 11.07.2022 | 1.7.3.8 | **physical memory protection(PMP)**: locking entry `i` in TOR mode will now also prevent write access to `pmpaddr(i-1)` (RISC-V compatibility); [#363](https://github.com/stnolting/neorv32/pull/363) |

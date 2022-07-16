@@ -10,11 +10,6 @@
 -- #  + CSR module:     Read/write access to control and status registers                          #
 -- #  + Debug module:   CPU debug mode handling (on-chip debugger)                                 #
 -- #  + Trigger module: Hardware-assisted breakpoints (on-chip debugger)                           #
--- #                                                                                               #
--- # NOTE: If <dedicated_reset_c> = true then <def_rst_val_c> evaluates to '-'. Registers that     #
--- #       reset to <def_rst_val_c> do NOT actually have a real reset by default and have to be    #
--- #       explicitly initialized by software! This is only used for "uncritical" registers. Many  #
--- #       of them will be initialized by the default crt0 start-up code.                          #
 -- # ********************************************************************************************* #
 -- # BSD 3-Clause License                                                                          #
 -- #                                                                                               #
@@ -394,7 +389,7 @@ begin
       fetch_engine.state_prev <= S_RESTART;
       fetch_engine.restart    <= '1'; -- set to reset IPB
       fetch_engine.unaligned  <= '0'; -- always start at aligned address after reset
-      fetch_engine.pc         <= (others => def_rst_val_c);
+      fetch_engine.pc         <= (others => '0');
       fetch_engine.pmp_err    <= '0';
     elsif rising_edge(clk_i) then
       -- previous state (for HPM) --
@@ -674,18 +669,16 @@ begin
       execute_engine.is_ci       <= def_rst_val_c;
       execute_engine.is_ici      <= def_rst_val_c;
       execute_engine.i_reg_last  <= (others => def_rst_val_c);
+      execute_engine.pc_last     <= (others => def_rst_val_c);
       execute_engine.next_pc     <= (others => def_rst_val_c);
-      ctrl                       <= (others => def_rst_val_c);
+      execute_engine.branched    <= def_rst_val_c;
       -- registers that DO require a specific RESET state --
+      ctrl                       <= (others => '0');
       execute_engine.pc          <= CPU_BOOT_ADDR(data_width_c-1 downto 2) & "00"; -- 32-bit aligned!
-      execute_engine.pc_last     <= CPU_BOOT_ADDR(data_width_c-1 downto 2) & "00";
       execute_engine.state       <= BRANCHED; -- reset is a branch from "somewhere"
       execute_engine.state_prev  <= BRANCHED; -- actual reset value is not relevant
       execute_engine.state_prev2 <= BRANCHED; -- actual reset value is not relevant
       execute_engine.sleep       <= '0';
-      execute_engine.branched    <= '1'; -- reset is a branch from "somewhere"
-      ctrl(ctrl_bus_rd_c)        <= '0';
-      ctrl(ctrl_bus_wr_c)        <= '0';
     elsif rising_edge(clk_i) then
       -- PC update --
       if (execute_engine.pc_we = '1') then
@@ -1309,7 +1302,7 @@ begin
 
       -- trigger module CSRs --
       when csr_tselect_c | csr_tdata1_c | csr_tdata2_c | csr_tdata3_c | csr_tinfo_c | csr_tcontrol_c | csr_mcontext_c | csr_scontext_c =>
-        -- access in debug-mode or M-mode (M-mode: writes to tdata* are ignored as DMODE is hardwired to 1)
+        -- access in debug-mode or M-mode only (M-mode: writes to tdata* are ignored as DMODE is hardwired to 1)
         csr_acc_valid <= (debug_ctrl.running or csr.privilege_eff) and bool_to_ulogic_f(CPU_EXTENSION_RISCV_DEBUG);
 
       -- undefined / not implemented --
@@ -1712,7 +1705,7 @@ begin
       trap_ctrl.cause_nxt <= trap_msi_c;
 
     -- interrupt: 1.7 machine timer interrupt (MTI) --
-    else--if (trap_ctrl.irq_buf(irq_mtime_irq_c) = '1') then -- last condition, so NO IF required
+    else--if (trap_ctrl.irq_buf(irq_mtime_irq_c) = '1') then -- last condition, so NO "IF" required
       trap_ctrl.cause_nxt <= trap_mti_c;
 
     end if;
@@ -1761,11 +1754,11 @@ begin
       csr.mie_meie          <= '0';
       csr.mie_mtie          <= '0';
       csr.mie_firqe         <= (others => '0');
-      csr.mtvec             <= (others => def_rst_val_c);
+      csr.mtvec             <= (others => '0');
       csr.mscratch          <= x"19880704";
-      csr.mepc              <= (others => def_rst_val_c);
-      csr.mcause            <= (others => def_rst_val_c);
-      csr.mtval             <= (others => def_rst_val_c);
+      csr.mepc              <= (others => '0');
+      csr.mcause            <= (others => '0');
+      csr.mtval             <= (others => '0');
       csr.mip_firq_nclr     <= (others => '-');
       --
       csr.pmpcfg            <= (others => (others => '0'));
@@ -1788,12 +1781,12 @@ begin
       csr.dcsr_ebreaku      <= '0';
       csr.dcsr_step         <= '0';
       csr.dcsr_prv          <= priv_mode_m_c;
-      csr.dcsr_cause        <= (others => def_rst_val_c);
-      csr.dpc               <= (others => def_rst_val_c);
-      csr.dscratch0         <= (others => def_rst_val_c);
+      csr.dcsr_cause        <= (others => '0');
+      csr.dpc               <= (others => '0');
+      csr.dscratch0         <= (others => '0');
       --
       csr.tdata1_exe        <= '0';
-      csr.tdata2            <= (others => def_rst_val_c);
+      csr.tdata2            <= (others => '0');
 
     elsif rising_edge(clk_i) then
       -- write access? --
@@ -1900,16 +1893,18 @@ begin
             end if;
             -- R/W: pmpaddr* - PMP address registers --
             if (csr.addr(11 downto 4) = csr_class_pmpaddr_c) then
-              for i in 0 to PMP_NUM_REGIONS-2 loop
-                if (csr.addr(3 downto 0) = std_ulogic_vector(to_unsigned(i, 4))) and (csr.pmpcfg(i)(7) = '0') and -- unlocked access
-                  ((csr.pmpcfg(i+1)(7) = '0') or (csr.pmpcfg(i+1)(3) = '0')) then -- pmpcfg(i+1) not "LOCKED TOR" [TOR-mode only!]
-                  csr.pmpaddr(i) <= csr.wdata(data_width_c-3 downto index_size_f(PMP_MIN_GRANULARITY)-2);
+              for i in 0 to PMP_NUM_REGIONS-1 loop
+                if (i < PMP_NUM_REGIONS-1) then
+                  if (csr.addr(3 downto 0) = std_ulogic_vector(to_unsigned(i, 4))) and (csr.pmpcfg(i)(7) = '0') and -- unlocked access
+                    ((csr.pmpcfg(i+1)(7) = '0') or (csr.pmpcfg(i+1)(3) = '0')) then -- pmpcfg(i+1) not "LOCKED TOR" [TOR-mode only!]
+                    csr.pmpaddr(i) <= csr.wdata(data_width_c-3 downto index_size_f(PMP_MIN_GRANULARITY)-2);
+                  end if;
+                else -- very last entry
+                  if (csr.addr(3 downto 0) = std_ulogic_vector(to_unsigned(i, 4))) and (csr.pmpcfg(i)(7) = '0') then -- unlocked access
+                    csr.pmpaddr(i) <= csr.wdata(data_width_c-3 downto index_size_f(PMP_MIN_GRANULARITY)-2);
+                  end if;
                 end if;
               end loop; -- i (PMP regions)
-              -- very last entry --
-              if (csr.addr(3 downto 0) = std_ulogic_vector(to_unsigned(PMP_NUM_REGIONS-1, 4))) and (csr.pmpcfg(PMP_NUM_REGIONS-1)(7) = '0') then -- unlocked access
-                csr.pmpaddr(PMP_NUM_REGIONS-1) <= csr.wdata(data_width_c-3 downto index_size_f(PMP_MIN_GRANULARITY)-2);
-              end if;
             end if;
           end if;
 
@@ -2509,7 +2504,6 @@ begin
     csr.mhpmcounter_nxt(i) <= std_ulogic_vector(unsigned('0' & csr.mhpmcounter(i)) + 1);
   end generate;
 
-
   -- hpm counter read --
   hpm_connect: process(csr)
   begin
@@ -2551,36 +2545,28 @@ begin
     end if;
   end process hpmcnt_ctrl;
 
-  hpm_triggers:
-  if (HPM_NUM_CNTS /= 0) generate
-    -- counter event trigger - RISC-V-specific --
-    cnt_event(hpmcnt_event_cy_c)      <= '1' when (execute_engine.sleep = '0') else '0'; -- active cycle
-    cnt_event(hpmcnt_event_never_c)   <= '0'; -- "never" (position would be TIME)
-    cnt_event(hpmcnt_event_ir_c)      <= '1' when (execute_engine.state = EXECUTE) else '0'; -- any executed instruction
+  -- STD counters event trigger (RISC-V-specific) --
+  cnt_event(hpmcnt_event_cy_c)      <= '1' when (execute_engine.sleep = '0') else '0'; -- active cycle
+  cnt_event(hpmcnt_event_never_c)   <= '0'; -- "never" (position would be TIME)
+  cnt_event(hpmcnt_event_ir_c)      <= '1' when (execute_engine.state = EXECUTE) else '0'; -- any executed instruction
 
-    -- counter event trigger - custom / NEORV32-specific --
-    cnt_event(hpmcnt_event_cir_c)     <= '1' when (execute_engine.state = EXECUTE)   and (execute_engine.is_ci      = '1')       else '0'; -- executed compressed instruction
-    cnt_event(hpmcnt_event_wait_if_c) <= '1' when (fetch_engine.state   = S_PENDING) and (fetch_engine.state_prev   = S_PENDING) else '0'; -- instruction fetch memory wait cycle
-    cnt_event(hpmcnt_event_wait_ii_c) <= '1' when (execute_engine.state = DISPATCH)  and (execute_engine.state_prev = DISPATCH)  else '0'; -- instruction issue wait cycle
-    cnt_event(hpmcnt_event_wait_mc_c) <= '1' when (execute_engine.state = ALU_WAIT)                                              else '0'; -- multi-cycle alu-operation wait cycle
+  -- HPM counters event trigger (NEORV32-specific) --
+  cnt_event(hpmcnt_event_cir_c)     <= '1' when (execute_engine.state = EXECUTE)   and (execute_engine.is_ci      = '1')       else '0'; -- executed compressed instruction
+  cnt_event(hpmcnt_event_wait_if_c) <= '1' when (fetch_engine.state   = S_PENDING) and (fetch_engine.state_prev   = S_PENDING) else '0'; -- instruction fetch memory wait cycle
+  cnt_event(hpmcnt_event_wait_ii_c) <= '1' when (execute_engine.state = DISPATCH)  and (execute_engine.state_prev = DISPATCH)  else '0'; -- instruction issue wait cycle
+  cnt_event(hpmcnt_event_wait_mc_c) <= '1' when (execute_engine.state = ALU_WAIT)                                              else '0'; -- multi-cycle alu-operation wait cycle
 
-    cnt_event(hpmcnt_event_load_c)    <= '1' when (ctrl(ctrl_bus_rd_c) = '1') else '0'; -- load operation
-    cnt_event(hpmcnt_event_store_c)   <= '1' when (ctrl(ctrl_bus_wr_c) = '1') else '0'; -- store operation
-    cnt_event(hpmcnt_event_wait_ls_c) <= '1' when (execute_engine.state = MEM_WAIT) and (execute_engine.state_prev2 = MEM_WAIT) else '0'; -- load/store memory wait cycle
+  cnt_event(hpmcnt_event_load_c)    <= '1' when (ctrl(ctrl_bus_rd_c) = '1') else '0'; -- load operation
+  cnt_event(hpmcnt_event_store_c)   <= '1' when (ctrl(ctrl_bus_wr_c) = '1') else '0'; -- store operation
+  cnt_event(hpmcnt_event_wait_ls_c) <= '1' when (execute_engine.state = MEM_WAIT) and (execute_engine.state_prev2 = MEM_WAIT) else '0'; -- load/store memory wait cycle
 
-    cnt_event(hpmcnt_event_jump_c)    <= '1' when (execute_engine.state = BRANCH)   and (execute_engine.i_reg(instr_opcode_lsb_c+2) = '1') else '0'; -- jump (unconditional)
-    cnt_event(hpmcnt_event_branch_c)  <= '1' when (execute_engine.state = BRANCH)   and (execute_engine.i_reg(instr_opcode_lsb_c+2) = '0') else '0'; -- branch (conditional, taken or not taken)
-    cnt_event(hpmcnt_event_tbranch_c) <= '1' when (execute_engine.state = BRANCHED) and (execute_engine.state_prev = BRANCH) and
-                                                                                        (execute_engine.i_reg(instr_opcode_lsb_c+2) = '0') else '0'; -- taken branch (conditional)
+  cnt_event(hpmcnt_event_jump_c)    <= '1' when (execute_engine.state = BRANCH)   and (execute_engine.i_reg(instr_opcode_lsb_c+2) = '1') else '0'; -- jump (unconditional)
+  cnt_event(hpmcnt_event_branch_c)  <= '1' when (execute_engine.state = BRANCH)   and (execute_engine.i_reg(instr_opcode_lsb_c+2) = '0') else '0'; -- branch (conditional, taken or not taken)
+  cnt_event(hpmcnt_event_tbranch_c) <= '1' when (execute_engine.state = BRANCHED) and (execute_engine.state_prev = BRANCH) and
+                                                                                      (execute_engine.i_reg(instr_opcode_lsb_c+2) = '0') else '0'; -- taken branch (conditional)
 
-    cnt_event(hpmcnt_event_trap_c)    <= '1' when (trap_ctrl.env_start_ack = '1')                                    else '0'; -- entered trap
-    cnt_event(hpmcnt_event_illegal_c) <= '1' when (trap_ctrl.env_start_ack = '1') and (trap_ctrl.cause = trap_iil_c) else '0'; -- illegal operation
-  end generate; --/hpm_triggers
-
-  hpm_triggers_none:
-  if (HPM_NUM_CNTS = 0) generate
-    cnt_event <= (others => '0');
-  end generate; --/hpm_triggers_none
+  cnt_event(hpmcnt_event_trap_c)    <= '1' when (trap_ctrl.env_start_ack = '1')                                    else '0'; -- entered trap
+  cnt_event(hpmcnt_event_illegal_c) <= '1' when (trap_ctrl.env_start_ack = '1') and (trap_ctrl.cause = trap_iil_c) else '0'; -- illegal operation
 
 
 -- ****************************************************************************************************************************
@@ -2659,7 +2645,7 @@ begin
   csr.dcsr_rd(09)           <= '0'; -- stoptime: timers increment as usual
   csr.dcsr_rd(08 downto 06) <= csr.dcsr_cause; -- debug mode entry cause
   csr.dcsr_rd(05)           <= '0'; -- reserved
-  csr.dcsr_rd(04)           <= '0'; -- mprven: mstatus.mprv is ignored in debug mode
+  csr.dcsr_rd(04)           <= '1'; -- mprven: mstatus.mprv is also evaluated in debug mode
   csr.dcsr_rd(03)           <= '0'; -- nmip: no pending non-maskable interrupt
   csr.dcsr_rd(02)           <= csr.dcsr_step; -- step: single-step mode
   csr.dcsr_rd(01 downto 00) <= (others => csr.dcsr_prv); -- prv: privilege mode when debug mode was entered
