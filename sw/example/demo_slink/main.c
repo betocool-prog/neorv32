@@ -50,10 +50,22 @@
 #define BAUD_RATE 19200
 /**@}*/
 
+/**@{*/
+/** SLINK Status Bits */
+#define FIFO_EMPTY_CH0  0x00000001
+#define FIFO_HALF_CH0   0x00000100
+#define FIFO_FULL_CH0   0x00010000
+#define FIFO_LAST_CH0   0x01000000
+/**@}*/
+
 // Prototypes
 void slink_rx_firq_handler(void);
 void slink_tx_firq_handler(void);
 uint32_t xorshift32(void);
+
+// Global variables
+static uint32_t tx_int_rxd = 0;
+static uint32_t rx_int_rxd = 0;
 
 
 /**********************************************************************//**
@@ -66,8 +78,13 @@ uint32_t xorshift32(void);
 int main() {
 
   int i;
+  uint32_t rx_fifo_size;
   uint32_t slink_data;
   int slink_status;
+  uint32_t do_loop;
+  uint32_t loops;
+  uint32_t errs;
+  uint32_t words_read;
 
   // capture all exceptions and give debug info via UART0
   neorv32_rte_setup();
@@ -99,11 +116,13 @@ int main() {
                        neorv32_slink_get_link_num(1),
                        neorv32_slink_get_fifo_depth(1));
 
+  rx_fifo_size = neorv32_slink_get_fifo_depth(0);
+
   neorv32_uart0_printf("\nNOTE: This demo program uses SLINK RX/TX channels 0 only.\n\n");
 
 
   // reset and enable SLINK module
-  neorv32_slink_setup((0b10 << (SLINK_IRQ_RX_LSB + 2*0)) | // RX link 0: IRQ if FIFO becomes not empty
+  neorv32_slink_setup((0b11 << (SLINK_IRQ_RX_LSB + 2*0)) | // RX link 0: IRQ if FIFO becomes more than half full
                       (0b11 << (SLINK_IRQ_TX_LSB + 2*0))); // TX link 0: IRQ if FIFO becomes less than half full
 
 
@@ -158,7 +177,130 @@ int main() {
     }
   }
 
-  neorv32_uart0_printf("\nProgram execution completed.\n");
+
+#define LOOPS           1024
+#define BLOCK_SIZE      5
+#define TOTAL_WORDS     LOOPS*BLOCK_SIZE
+  neorv32_uart0_printf("\n-------- IRQ Demo --------\n");
+  neorv32_uart0_printf("Will send %d words (%d blocks @ %d words)\n", TOTAL_WORDS, LOOPS, BLOCK_SIZE);
+  tx_int_rxd = 0;
+  rx_int_rxd = 0;
+  loops = 0;
+  do_loop = 1;
+  errs = 0;
+  words_read = 0;  
+  
+  // Check block size against rx fifo size
+  if (rx_fifo_size < BLOCK_SIZE) {
+    neorv32_uart0_printf("ERROR! Block size %d larger than implemented fifo %d", BLOCK_SIZE, rx_fifo_size);
+    return -1;
+  }
+
+  while(do_loop)
+  {
+    loops++;
+    // We'll test the half transfer interrupts here by sending less
+    // than half the data many times inside the while loop
+    for(i=0; i<BLOCK_SIZE; i++)
+    {
+      slink_data = xorshift32();
+      slink_status = neorv32_slink_tx(0, slink_data, 0); // "normal" transmission
+      if(0 != slink_status)
+      {
+        errs++;
+      }
+    }
+
+    // Handle a receive IRQ
+    if(rx_int_rxd)
+    {
+      neorv32_uart0_printf("\nRx Interrupt!\n");
+      neorv32_uart0_printf("RX Status: 0x%x at loop #%d\n", NEORV32_SLINK.RX_STATUS, loops);
+      rx_int_rxd = 0;
+
+      if(NEORV32_SLINK.RX_STATUS & FIFO_EMPTY_CH0)
+      {
+        neorv32_uart0_printf("RX Fifo empty!\n");
+      }
+
+      if(NEORV32_SLINK.RX_STATUS & FIFO_HALF_CH0)
+      {
+        neorv32_uart0_printf("RX Fifo Half! Reading contents....\n");
+        for(i = 0; i < rx_fifo_size/2; i++)
+        {
+          slink_status = neorv32_slink_rx(0, &slink_data); 
+          if(0 != slink_status)
+          {
+            neorv32_uart0_printf("Failed to read RX fifo after half irq\n");
+          }
+          else
+          {
+            words_read++;
+          }
+        }
+      }
+
+      // Hopefully it never reaches here!
+      if(NEORV32_SLINK.RX_STATUS & FIFO_FULL_CH0)
+      {
+        neorv32_uart0_printf("RX Fifo Full! Reading contents....\n");
+        for(i = 0; i < rx_fifo_size; i++)
+        {
+          slink_status = neorv32_slink_rx(0, &slink_data); 
+          if(0 != slink_status)
+          {
+            neorv32_uart0_printf("Failed to read RX fifo after full irq\n");
+          }
+          else
+          {
+            words_read++;
+          }
+        }
+      }
+    }
+
+    // Handle a transmit IRQ
+    if(tx_int_rxd)
+    {
+      neorv32_uart0_printf("\nTx Interrupt!\n");
+      tx_int_rxd = 0;
+
+      if(NEORV32_SLINK.TX_STATUS & FIFO_EMPTY_CH0)
+      {
+        neorv32_uart0_printf("TX Fifo empty!");
+      }
+
+      if(NEORV32_SLINK.TX_STATUS & FIFO_HALF_CH0)
+      {
+        neorv32_uart0_printf("TX Fifo Half IRQ!\n");
+      }
+
+      // Hopefully it never reaches here!
+      if(NEORV32_SLINK.TX_STATUS & FIFO_FULL_CH0)
+      {
+        neorv32_uart0_printf("TX Fifo Full!\n");
+      }
+    }
+
+    if(LOOPS == loops)
+    {
+      do_loop = 0;
+    }
+  }
+
+  // Flush the buffers!
+  slink_status = 0;
+  while(0 == slink_status)
+  {
+    slink_status = neorv32_slink_rx(0, &slink_data);
+    if(0 == slink_status)
+    {
+      words_read++;
+    }
+  }
+  neorv32_uart0_printf("Words read (total): %d\n", words_read);
+  
+  neorv32_uart0_printf("\nProgram execution completed with %d errors.\n", errs);
   return 0;
 }
 
@@ -170,7 +312,8 @@ void slink_rx_firq_handler(void) {
 
   neorv32_cpu_csr_write(CSR_MIP, ~(1 << SLINK_RX_FIRQ_PENDING)); // ack FIRQ
 
-  neorv32_uart0_printf(" <<SLINK RX IRQ!>> ");
+  // This flag tells the main loop to process the IRQ
+  rx_int_rxd = 1;
 }
 
 
@@ -181,7 +324,9 @@ void slink_tx_firq_handler(void) {
 
   neorv32_cpu_csr_write(CSR_MIP, ~(1 << SLINK_TX_FIRQ_PENDING)); // ack FIRQ
 
-  neorv32_uart0_printf(" <<SLINK TX IRQ!>> ");
+  // This flag tells the main loop to process the IRQ
+  tx_int_rxd = 1;
+
 }
 
 
